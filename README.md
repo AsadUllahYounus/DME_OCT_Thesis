@@ -64,7 +64,7 @@ Supported formats: PNG, JPG, JPEG, BMP, TIF, TIFF, DCM
 ### Basic Training
 
 ```bash
-python simclr_oct.py \
+python main.py \
     --data ./datasets/oct_images \
     --dataset-name oct \
     --arch resnet18 \
@@ -76,7 +76,7 @@ python simclr_oct.py \
 ### Advanced Training Options
 
 ```bash
-python simclr_oct.py \
+python main.py \
     --data ./datasets/oct_images \
     --dataset-name oct \
     --arch resnet50 \
