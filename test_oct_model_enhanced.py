@@ -61,7 +61,7 @@ def evaluate_test_set(model, test_dir, transform, class_to_idx, device):
         
         # Process each image in the class directory
         for img_file in os.listdir(class_dir):
-            if not img_file.lower().endswith(('.png', '.jpg', '.jpeg')):
+            if not img_file.lower().endswith(('.png', '.jpg', '.jpeg','.bmp', '.tif', '.tiff', '.dcm')):
                 continue
                 
             img_path = os.path.join(class_dir, img_file)
