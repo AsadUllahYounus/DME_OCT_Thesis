@@ -17,6 +17,7 @@ import logging
 import sys
 from PIL import Image, ImageOps
 from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -97,52 +98,33 @@ class GaussianBlur(object):
         self.tensor_to_pil = transforms.ToPILImage()
 
     def __call__(self, img):
-        # Convert the PIL image to a
+        # Convert the PIL image to tensor, apply blur, and convert back
+        img = self.pil_to_tensor(img).unsqueeze(0)
+        img = self.blur(img).squeeze(0)
+        img = self.tensor_to_pil(img)
+        return img
 
 # Supervised OCT dataset class
 class SupervisedOCTDataset(Dataset):
-    def __init__(self, data_dir, transform=None, class_to_idx=None):
+    def __init__(self, image_paths, labels, class_names, transform=None):
         """
         Args:
-            data_dir (string): Directory with subdirectories for each class
+            image_paths (list): List of image file paths
+            labels (list): List of corresponding labels (integers)
+            class_names (list): List of class names
             transform (callable, optional): Optional transform to be applied on a sample.
-            class_to_idx (dict): Mapping from class names to indices
         """
-        self.data_dir = data_dir
+        self.image_paths = image_paths
+        self.labels = labels
+        self.class_names = class_names
         self.transform = transform
         
-        # Get class names from subdirectories
-        self.classes = sorted([d for d in os.listdir(data_dir) 
-                              if os.path.isdir(os.path.join(data_dir, d))])
-        
-        if class_to_idx is None:
-            self.class_to_idx = {cls_name: idx for idx, cls_name in enumerate(self.classes)}
-        else:
-            self.class_to_idx = class_to_idx
-            
-        self.idx_to_class = {idx: cls_name for cls_name, idx in self.class_to_idx.items()}
-        
-        # Get all image file paths and labels
-        self.image_paths = []
-        self.labels = []
-        
-        for class_name in self.classes:
-            class_dir = os.path.join(data_dir, class_name)
-            class_idx = self.class_to_idx[class_name]
-            
-            for root, _, files in os.walk(class_dir):
-                for file in files:
-                    if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.dcm')):
-                        self.image_paths.append(os.path.join(root, file))
-                        self.labels.append(class_idx)
-        
-        print(f"Found {len(self.image_paths)} images across {len(self.classes)} classes")
-        print(f"Classes: {self.classes}")
+        print(f"Dataset created with {len(self.image_paths)} images across {len(set(labels))} classes")
         
         # Print class distribution
         class_counts = {}
-        for label in self.labels:
-            class_name = self.idx_to_class[label]
+        for label in labels:
+            class_name = class_names[label]
             class_counts[class_name] = class_counts.get(class_name, 0) + 1
         
         print("Class distribution:")
@@ -187,22 +169,53 @@ class SupervisedOCTDataset(Dataset):
             
         return image, label
 
-class SupervisedLearningDataset:
+class OCTDatasetLoader:
     def __init__(self, root_folder):
         self.root_folder = root_folder
+        self.image_paths = []
+        self.labels = []
+        self.class_names = []
+        self._load_dataset()
+
+    def _load_dataset(self):
+        """Load all images from class subdirectories"""
+        # Get class names from subdirectories
+        self.class_names = sorted([d for d in os.listdir(self.root_folder) 
+                                 if os.path.isdir(os.path.join(self.root_folder, d))])
+        
+        if len(self.class_names) == 0:
+            raise ValueError(f"No class directories found in {self.root_folder}")
+        
+        class_to_idx = {cls_name: idx for idx, cls_name in enumerate(self.class_names)}
+        
+        # Get all image file paths and labels
+        for class_name in self.class_names:
+            class_dir = os.path.join(self.root_folder, class_name)
+            class_idx = class_to_idx[class_name]
+            
+            for root, _, files in os.walk(class_dir):
+                for file in files:
+                    if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.dcm')):
+                        self.image_paths.append(os.path.join(root, file))
+                        self.labels.append(class_idx)
+        
+        print(f"Found {len(self.image_paths)} images across {len(self.class_names)} classes")
+        print(f"Classes: {self.class_names}")
 
     @staticmethod
     def get_oct_pipeline_transform(size, is_training=True):
-        """Return basic transformations for OCT images without augmentations."""
+        """Return basic transformations for OCT images."""
         if is_training:
-            # Training transformations - minimal processing
+            # Training transformations with basic augmentation
             data_transforms = transforms.Compose([
                 transforms.Resize((size, size)),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomRotation(degrees=10),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5])  # Normalized for grayscale
             ])
         else:
-            # Validation/test transformations - same as training
+            # Validation/test transformations - no augmentation
             data_transforms = transforms.Compose([
                 transforms.Resize((size, size)),
                 transforms.ToTensor(),
@@ -210,26 +223,44 @@ class SupervisedLearningDataset:
             ])
         return data_transforms
 
-    def get_dataset(self, split='train', image_size=224):
-        """Get dataset for training or validation"""
-        if split == 'train':
-            data_dir = os.path.join(self.root_folder, 'train')
-            is_training = True
-        elif split == 'val' or split == 'validation':
-            data_dir = os.path.join(self.root_folder, 'val')
-            is_training = False
-        elif split == 'test':
-            data_dir = os.path.join(self.root_folder, 'test')
-            is_training = False
+    def get_splits(self, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, random_state=42):
+        """Split the dataset into train, validation, and test sets"""
+        if abs(train_ratio + val_ratio + test_ratio - 1.0) > 1e-6:
+            raise ValueError("train_ratio + val_ratio + test_ratio must equal 1.0")
+        
+        # First split: train vs (val + test)
+        train_paths, temp_paths, train_labels, temp_labels = train_test_split(
+            self.image_paths, self.labels, 
+            test_size=(val_ratio + test_ratio), 
+            random_state=random_state, 
+            stratify=self.labels
+        )
+        
+        # Second split: val vs test
+        if val_ratio > 0 and test_ratio > 0:
+            val_paths, test_paths, val_labels, test_labels = train_test_split(
+                temp_paths, temp_labels,
+                test_size=test_ratio/(val_ratio + test_ratio),
+                random_state=random_state,
+                stratify=temp_labels
+            )
+        elif val_ratio > 0:
+            val_paths, val_labels = temp_paths, temp_labels
+            test_paths, test_labels = [], []
         else:
-            raise ValueError(f"Invalid split: {split}. Choose from 'train', 'val', or 'test'")
+            test_paths, test_labels = temp_paths, temp_labels
+            val_paths, val_labels = [], []
         
-        if not os.path.exists(data_dir):
-            raise FileNotFoundError(f"Data directory not found: {data_dir}")
-        
+        return {
+            'train': (train_paths, train_labels),
+            'val': (val_paths, val_labels),
+            'test': (test_paths, test_labels)
+        }
+
+    def get_dataset(self, image_paths, labels, image_size=224, is_training=True):
+        """Create a dataset from given paths and labels"""
         transform = self.get_oct_pipeline_transform(image_size, is_training)
-        dataset = SupervisedOCTDataset(data_dir, transform=transform)
-        
+        dataset = SupervisedOCTDataset(image_paths, labels, self.class_names, transform=transform)
         return dataset
 
 # Model architecture for supervised learning
@@ -371,7 +402,7 @@ class SupervisedTrainer(object):
         
         return epoch_loss, epoch_acc, all_predictions, all_labels
 
-    def train(self, train_loader, val_loader=None):
+    def train(self, train_loader, val_loader=None, class_names=None):
         # Save config file
         save_config_file(self.writer.log_dir, self.args)
         
@@ -399,9 +430,7 @@ class SupervisedTrainer(object):
                     self.best_acc = val_acc
                     
                     # Generate detailed validation report
-                    if hasattr(train_loader.dataset, 'classes'):
-                        class_names = train_loader.dataset.classes
-                    else:
+                    if class_names is None:
                         class_names = [f'Class_{i}' for i in range(len(set(val_labels)))]
                     
                     report = classification_report(val_labels, val_predictions, 
@@ -452,7 +481,7 @@ def parse_args():
     
     parser = argparse.ArgumentParser(description='PyTorch Supervised Learning for OCT Images')
     parser.add_argument('-data', metavar='DIR', default='./datasets',
-                        help='path to dataset (should contain train/val/test subdirectories)')
+                        help='path to dataset (should contain class subdirectories)')
     parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet18',
                         choices=model_names,
                         help='model architecture: ' +
@@ -484,8 +513,12 @@ def parse_args():
                         help='Use pretrained ImageNet weights')
     parser.add_argument('--scheduler', default='cosine', choices=['cosine', 'step', 'plateau'],
                         help='Learning rate scheduler')
-    parser.add_argument('--num-classes', type=int, required=True,
-                        help='Number of classes in the dataset')
+    parser.add_argument('--train-ratio', default=1, type=float,
+                        help='Ratio of data to use for training (default: 0.7)')
+    parser.add_argument('--val-ratio', default=0, type=float,
+                        help='Ratio of data to use for validation (default: 0.15)')
+    parser.add_argument('--test-ratio', default=0, type=float,
+                        help='Ratio of data to use for testing (default: 0.15)')
 
     args = parser.parse_args()
     return args
@@ -507,32 +540,44 @@ def main():
         args.device = torch.device('cpu')
         args.gpu_index = -1
 
-    # Prepare datasets
-    dataset_loader = SupervisedLearningDataset(args.data)
+    # Load and split the dataset
+    dataset_loader = OCTDatasetLoader(args.data)
+    splits = dataset_loader.get_splits(
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio, 
+        test_ratio=args.test_ratio,
+        random_state=args.seed
+    )
     
-    # Load training dataset
-    train_dataset = dataset_loader.get_dataset('train', args.image_size)
+    # Auto-detect number of classes
+    num_classes = len(dataset_loader.class_names)
+    print(f"Auto-detected {num_classes} classes: {dataset_loader.class_names}")
+    
+    # Create datasets
+    train_paths, train_labels = splits['train']
+    train_dataset = dataset_loader.get_dataset(train_paths, train_labels, args.image_size, is_training=True)
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
         num_workers=args.workers, pin_memory=True
     )
     
-    # Load validation dataset if available
+    # Create validation loader if validation data exists
     val_loader = None
-    try:
-        val_dataset = dataset_loader.get_dataset('val', args.image_size)
+    val_paths, val_labels = splits['val']
+    if len(val_paths) > 0:
+        val_dataset = dataset_loader.get_dataset(val_paths, val_labels, args.image_size, is_training=False)
         val_loader = DataLoader(
             val_dataset, batch_size=args.batch_size, shuffle=False,
             num_workers=args.workers, pin_memory=True
         )
-        print(f"Validation dataset loaded with {len(val_dataset)} images")
-    except FileNotFoundError:
-        print("No validation dataset found. Training without validation.")
+        print(f"Validation dataset created with {len(val_dataset)} images")
+    else:
+        print("No validation dataset created.")
 
     # Create model
     model = ResNetOCTClassifier(
         base_model=args.arch, 
-        num_classes=args.num_classes, 
+        num_classes=num_classes, 
         pretrained=args.pretrained
     )
     
@@ -556,7 +601,7 @@ def main():
 
     # Train the model
     trainer = SupervisedTrainer(model=model, optimizer=optimizer, scheduler=scheduler, args=args)
-    trainer.train(train_loader, val_loader)
+    trainer.train(train_loader, val_loader, class_names=dataset_loader.class_names)
 
 if __name__ == "__main__":
     main()
