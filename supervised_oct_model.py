@@ -136,7 +136,11 @@ class GaussianBlur(object):
         self.tensor_to_pil = transforms.ToPILImage()
 
     def __call__(self, img):
-        # Convert the PIL image to a
+        # Convert the PIL image to tensor, apply blur, and convert back
+        img = self.pil_to_tensor(img).unsqueeze(0)
+        img = self.blur(img).squeeze(0)
+        img = self.tensor_to_pil(img)
+        return img
 
 # Supervised OCT dataset class
 class SupervisedOCTDataset(Dataset):
