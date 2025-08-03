@@ -513,11 +513,11 @@ def parse_args():
                         help='Use pretrained ImageNet weights')
     parser.add_argument('--scheduler', default='cosine', choices=['cosine', 'step', 'plateau'],
                         help='Learning rate scheduler')
-    parser.add_argument('--train-ratio', default=1, type=float,
+    parser.add_argument('--train-ratio', default=0.9, type=float,
                         help='Ratio of data to use for training (default: 0.7)')
-    parser.add_argument('--val-ratio', default=0, type=float,
+    parser.add_argument('--val-ratio', default=0.05, type=float,
                         help='Ratio of data to use for validation (default: 0.15)')
-    parser.add_argument('--test-ratio', default=0, type=float,
+    parser.add_argument('--test-ratio', default=0.05, type=float,
                         help='Ratio of data to use for testing (default: 0.15)')
 
     args = parser.parse_args()
